@@ -35,7 +35,8 @@ h1, h2, h3 { color: #e0e0ff !important; }
 """, unsafe_allow_html=True)
 
 from signal_processing import (load_ecg_csv, preprocess_ecg, detect_qrs,
-                                compute_averaged_beat, estimate_qrs_duration)
+                                compute_averaged_beat, estimate_qrs_duration,
+                                estimate_qrs_onset)
 from uhf_mapping import (compute_uhf_envelopes, compute_uhfat, compute_vd,
                           compute_edys, build_uhf_heatmap_matrix)
 from nd_ecg import (compute_negative_derivative, compute_ndat,
@@ -186,11 +187,15 @@ with st.spinner("Averaging beats..."):
 # QRS Duration
 qrs_dur_info = estimate_qrs_duration(avg_beats, time_ms, fs)
 
+# QRS Onset (UHFAT/NDAT için ortak referans)
+qrs_onset_info = estimate_qrs_onset(avg_beats, time_ms, fs)
+qrs_onset_ms = qrs_onset_info['qrs_onset_ms']
+
 # ND-ECG Analysis
 with st.spinner("Computing ND-ECG..."):
     nd_signals = compute_negative_derivative(avg_beats, fs)
-    ndat_values = compute_ndat(nd_signals, time_ms)
-    nd_dys_info = compute_nd_dys(ndat_values)
+    ndat_values = compute_ndat(nd_signals, time_ms, qrs_onset_ms=qrs_onset_ms)
+    nd_dys_info = compute_nd_dys(ndat_values, leads_order=leads_order)
     nd_matrix, nd_leads = build_nd_heatmap_matrix(nd_signals, leads_order)
 
 # UHF Analysis
@@ -204,9 +209,10 @@ if uhf_possible:
     with st.spinner("Computing UHF-ECG envelopes..."):
         uhf_envelopes = compute_uhf_envelopes(avg_beats, fs, leads_order)
         if uhf_envelopes:
-            uhfat_values = compute_uhfat(uhf_envelopes, time_ms, threshold=uhf_threshold)
+            uhfat_values = compute_uhfat(uhf_envelopes, time_ms, threshold=uhf_threshold,
+                                         qrs_onset_ms=qrs_onset_ms)
             vd_uhf = compute_vd(uhf_envelopes, time_ms, threshold=uhf_threshold)
-            edys_info = compute_edys(uhfat_values)
+            edys_info = compute_edys(uhfat_values, leads_order=leads_order)
             uhf_matrix, _ = build_uhf_heatmap_matrix(uhf_envelopes, leads_order)
 
 # Compute ND Vd equivalent

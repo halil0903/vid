@@ -37,28 +37,44 @@ def compute_negative_derivative(averaged_beats, fs, filter_band=(1,40)):
         nd_signals[lead] = {'raw_derivative': deriv, 'smooth_derivative': deriv_smooth, 'normalized': deriv_norm}
     return nd_signals
 
-def compute_ndat(nd_signals, time_axis_ms):
+def compute_ndat(nd_signals, time_axis_ms, qrs_onset_ms=0.0):
+    """ND aktivasyon zamanı (NDAT) — QRS ONSET referanslı (intrinsicoid deflection).
+
+    -dV/dt tepe noktasının zamanı, 'QRS onset = 0' eksenine kaydırılarak verilir;
+    böylece UHFAT ile aynı referansta ve lead'ler arası karşılaştırılabilir olur.
+    """
     ndat = {}
     for lead, data in nd_signals.items():
         nd = data['smooth_derivative']
         peak_idx = np.argmax(nd)
-        ndat[lead] = float(time_axis_ms[peak_idx])
+        ndat[lead] = float(time_axis_ms[peak_idx] - qrs_onset_ms)
     return ndat
 
-def compute_nd_dys(ndat_values):
-    if not ndat_values: return {'nd_dys':0.0,'earliest_lead':'','latest_lead':''}
-    leads = list(ndat_values.keys())
-    times = [ndat_values[l] for l in leads]
+
+def compute_nd_dys(ndat_values, leads_order=None):
+    """nd-DYS — e-DYS ile aynı sağlam yön (regresyon eğimi) mantığı."""
+    if not ndat_values:
+        return {'nd_dys':0.0,'nd_dys_abs':0.0,'earliest_lead':'','latest_lead':''}
+    if leads_order is None:
+        po = ['V1','V2','V3','V4','V5','V6','V7','V8']
+        leads_order = [l for l in po if l in ndat_values]
+    leads = [l for l in leads_order if l in ndat_values]
+    if len(leads) < 2:
+        only = leads[0] if leads else ''
+        return {'nd_dys':0.0,'nd_dys_abs':0.0,'earliest_lead':only,'latest_lead':only}
+    times = np.array([ndat_values[l] for l in leads])
     ei, li = int(np.argmin(times)), int(np.argmax(times))
-    nd_dys = times[li] - times[ei]
-    po = ['V1','V2','V3','V4','V5','V6','V7','V8']
-    el, ll = leads[ei], leads[li]
-    ep = po.index(el) if el in po else 0
-    lp = po.index(ll) if ll in po else 0
-    sign = 1.0 if lp >= ep else -1.0
-    return {'nd_dys': float(sign*nd_dys), 'nd_dys_abs': float(nd_dys),
-            'earliest_lead': el, 'latest_lead': ll,
-            'earliest_time_ms': float(times[ei]), 'latest_time_ms': float(times[li])}
+    nd_dys_abs = float(times[li] - times[ei])
+    positions = np.arange(len(leads), dtype=float)
+    if np.std(times) > 0:
+        slope = float(np.polyfit(positions, times, 1)[0])
+        sign = 1.0 if slope >= 0 else -1.0
+    else:
+        slope = 0.0; sign = 1.0
+    return {'nd_dys': float(sign*nd_dys_abs), 'nd_dys_abs': nd_dys_abs,
+            'earliest_lead': leads[ei], 'latest_lead': leads[li],
+            'earliest_time_ms': float(times[ei]), 'latest_time_ms': float(times[li]),
+            'activation_slope': slope}
 
 def build_nd_heatmap_matrix(nd_signals, leads_order=None):
     if leads_order is None:

@@ -116,14 +116,53 @@ def detect_qrs(signals_dict, fs, ref_lead=None):
     return {'r_peaks': rp, 'reference_lead': ref_lead, 'heart_rate_bpm': hr, 'n_beats': len(rp), 'rr_intervals_ms': rr}
 
 def extract_beats(sig, r_peaks, fs, window_ms=(-100, 200)):
+    """Çıkarılan beat'leri ve bunlara karşılık gelen r_peaks İNDEKSLERİNİ döndürür.
+    (İndeks, lead'ler arası ortak beat maskesi için gereklidir.)"""
     pre = int(abs(window_ms[0])*fs/1000); post = int(window_ms[1]*fs/1000); total = pre+post
-    beats, vp = [], []
-    for p in r_peaks:
+    beats, valid_idx = [], []
+    for i, p in enumerate(r_peaks):
         s, e = p-pre, p+post
         if s>=0 and e<=len(sig):
             b = sig[s:e]
-            if len(b)==total: beats.append(b); vp.append(p)
-    return np.array(beats) if beats else np.array([]).reshape(0,total), np.array(vp)
+            if len(b)==total:
+                beats.append(b); valid_idx.append(i)
+    if beats:
+        return np.array(beats), np.array(valid_idx, dtype=int)
+    return np.array([]).reshape(0,total), np.array([], dtype=int)
+
+
+def compute_common_beat_mask(signals_dict, r_peaks, fs, window_ms, ref_lead, thr=0.85):
+    """Lead'ler arası TUTARLI beat seçimi.
+
+    Referans lead üzerinde template-korelasyonu ile gürültülü beat'leri tespit
+    eder ve aynı kabul kararını (ortak maske) TÜM lead'lere uygular. Böylece her
+    lead aynı kalp atımlarından ortalanır; lead'ler arası zamanlama karşılaştırması
+    (e-DYS / nd-DYS'nin temeli) tutarlı kalır.
+
+    Döndürür: (kabul edilen r_peaks indeksleri, kalite skoru, n_rejected)
+    """
+    if ref_lead not in signals_dict:
+        ref_lead = list(signals_dict.keys())[0]
+    ref_beats, valid_idx = extract_beats(signals_dict[ref_lead], r_peaks, fs, window_ms)
+    if len(ref_beats) < 3:
+        return valid_idx, 1.0, 0
+    template = np.median(ref_beats, axis=0)
+    scores = []
+    for b in ref_beats:
+        try:
+            r, _ = pearsonr(b, template)
+            scores.append(r if not np.isnan(r) else 0.0)
+        except Exception:
+            scores.append(0.0)
+    scores = np.array(scores)
+    good = scores >= thr
+    if np.sum(good) < 3:
+        good = np.zeros_like(good, dtype=bool)
+        good[np.argsort(scores)[-3:]] = True
+    accepted_idx = valid_idx[good]
+    quality = float(np.mean(scores[good])) if np.any(good) else 0.0
+    n_rejected = int(np.sum(~good))
+    return accepted_idx, quality, n_rejected
 
 def reject_noisy_beats(beats, thr=0.85):
     if len(beats)<3: return beats, 0, np.ones(len(beats))
@@ -136,20 +175,64 @@ def reject_noisy_beats(beats, thr=0.85):
     if len(gb)<3: return beats, 0, np.ones(len(beats))
     return gb, int(np.sum(~gm)), sc
 
-def compute_averaged_beat(signals_dict, r_peaks, fs, window_ms=(-100,200)):
-    avg = {}; tu, tr = 0, 0; qsa = []
+def compute_averaged_beat(signals_dict, r_peaks, fs, window_ms=(-100,200), ref_lead=None):
+    """DÜZELTİLMİŞ beat averaging — lead'ler arası ORTAK beat reddi.
+
+    Önceki sürüm her lead'i bağımsız reddediyordu; bu, lead'ler arasında farklı
+    atım setlerinin ortalanmasına ve dolayısıyla lead'ler arası zamanlama
+    karşılaştırmalarının (e-DYS / nd-DYS) güvenilmez olmasına yol açıyordu.
+    Bu sürüm referans lead'den ortak bir kabul maskesi üretir ve tüm lead'lere
+    aynı atım setini uygular.
+    """
+    if ref_lead is None or ref_lead not in signals_dict:
+        ref_lead = max(signals_dict.keys(),
+                       key=lambda l: np.max(np.abs(signals_dict[l])))
+    accepted_idx, quality, n_rejected = compute_common_beat_mask(
+        signals_dict, r_peaks, fs, window_ms, ref_lead, thr=0.85)
+    accepted_peaks = np.array(r_peaks)[accepted_idx] if len(accepted_idx) else np.array([])
+
+    pre = int(abs(window_ms[0])*fs/1000); post = int(window_ms[1]*fs/1000); total = pre+post
+    avg = {}
     for lead, s in signals_dict.items():
-        beats, _ = extract_beats(s, r_peaks, fs, window_ms)
-        if len(beats)<2:
-            avg[lead] = np.zeros(int((window_ms[1]-window_ms[0])*fs/1000)); continue
-        gb, rej, sc = reject_noisy_beats(beats)
-        avg[lead] = np.median(gb, axis=0)
-        tu = max(tu, len(gb)); tr = max(tr, rej)
-        qsa.extend(sc[sc>0])
-    n = len(next(iter(avg.values()))); pre = int(abs(window_ms[0])*fs/1000)
-    t = (np.arange(n)-pre)/fs*1000
-    return {'averaged_beats': avg, 'n_beats_used': tu, 'n_beats_rejected': tr,
-            'quality_score': float(np.mean(qsa)) if qsa else 0, 'time_axis_ms': t, 'window_ms': window_ms}
+        beats = []
+        for p in accepted_peaks:
+            st_, en_ = p-pre, p+post
+            if st_>=0 and en_<=len(s):
+                b = s[st_:en_]
+                if len(b)==total: beats.append(b)
+        avg[lead] = np.median(np.array(beats), axis=0) if beats else np.zeros(total)
+
+    t = (np.arange(total)-pre)/fs*1000
+    return {'averaged_beats': avg, 'n_beats_used': int(len(accepted_peaks)),
+            'n_beats_rejected': n_rejected, 'quality_score': quality,
+            'time_axis_ms': t, 'window_ms': window_ms, 'reference_lead': ref_lead}
+
+
+def estimate_qrs_onset(avg_beats, time_ms, fs):
+    """Tüm lead'lerin birleşik RMS enerjisinden TEK bir sağlam QRS onset.
+
+    UHFAT/NDAT değerlerini 'QRS onset'ten ms' olarak raporlayabilmek için
+    aktivasyon zamanlarının kaydırılacağı referansı sağlar. Tek lead yerine
+    birleşik sinyal kullanmak, tek bir gürültülü lead'in onset'i kaydırmasını
+    engeller.
+    """
+    leads = list(avg_beats.keys())
+    if not leads:
+        return {'qrs_onset_ms': 0.0, 'qrs_offset_ms': 0.0, 'qrs_duration_ms': 0.0}
+    stack = np.vstack([avg_beats[l] for l in leads])
+    rms = np.sqrt(np.mean(stack**2, axis=0))
+    energy = rms**2
+    w = max(int(0.005*fs), 3)
+    if w % 2 == 0: w += 1
+    smooth = np.convolve(energy, np.ones(w)/w, mode='same')
+    thr = 0.05*np.max(smooth)
+    idx = np.where(smooth > thr)[0]
+    if len(idx) < 2:
+        return {'qrs_onset_ms': float(time_ms[0]), 'qrs_offset_ms': float(time_ms[-1]),
+                'qrs_duration_ms': float(time_ms[-1]-time_ms[0])}
+    onset, offset = float(time_ms[idx[0]]), float(time_ms[idx[-1]])
+    return {'qrs_onset_ms': onset, 'qrs_offset_ms': offset,
+            'qrs_duration_ms': offset-onset}
 
 def estimate_qrs_duration(avg_beats, time_ms, fs, ref_lead=None):
     if ref_lead and ref_lead in avg_beats: beat = avg_beats[ref_lead]
