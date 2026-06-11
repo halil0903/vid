@@ -46,6 +46,8 @@ from visualization import (plot_activation_map, plot_ved_scale, plot_ecg_traces,
                             plot_summary_metrics, fig_to_bytes)
 from report_generator import generate_pdf_report
 from sample_data_generator import generate_ecg_signal, save_ecg_csv
+from quality_checks import (assess_sampling_rate, assess_lead_configuration,
+                            assess_averaging_quality, overall_confidence)
 
 def get_leads_order(lead_names):
     order = ['V1','V2','V3','V4','V5','V6','V7','V8']
@@ -74,6 +76,9 @@ with st.sidebar:
                                           help="CSV with columns: time_s, V1, V2, ..., V6")
     else:
         sample_pattern = st.selectbox("Pattern", ["Normal Sinus", "LBBB", "RBBB"])
+        sample_realism = st.selectbox(
+            "Sinyal kalitesi", ["clean", "basic", "realistic", "noisy"], index=2,
+            help="clean: gürültüsüz · basic: hafif · realistic: baseline+EMG+hareket · noisy: ağır gürültü")
     
     st.markdown("### ⚙️ Parameters")
     fs_input = st.number_input("Sampling Rate (Hz)", min_value=100, max_value=10000,
@@ -133,7 +138,8 @@ with st.spinner("Loading ECG data..."):
         elif sample_pattern:
             pat_map = {"Normal Sinus": "normal", "LBBB": "lbbb", "RBBB": "rbbb"}
             synth = generate_ecg_signal(fs=fs_input, duration_s=10,
-                                         pattern=pat_map[sample_pattern])
+                                         pattern=pat_map[sample_pattern],
+                                         realism=locals().get('sample_realism', 'realistic'))
             ecg_data = {
                 'signals': synth['signals'], 'fs': float(fs_input),
                 'time': synth['time_s'], 'duration_s': 10.0,
@@ -154,15 +160,22 @@ if not leads_order:
     st.error("No precordial leads (V1-V8) found in data.")
     st.stop()
 
-# Quality warnings
-if fs < 500:
-    st.error(f"⚠️ Sampling rate ({fs:.0f} Hz) is too low for meaningful analysis.")
+# ── Kalite değerlendirmesi: örnekleme oranı ──
+fs_assess = assess_sampling_rate(fs)
+if fs_assess['level'] == 'error':
+    st.error(f"⚠️ {fs_assess['message']}")
     st.stop()
+elif fs_assess['level'] == 'warning':
+    st.warning(f"⚠️ {fs_assess['message']}")
+uhf_possible = fs_assess['uhf_possible']
 
-uhf_possible = fs >= 1000
-if not uhf_possible:
-    st.warning(f"⚠️ Sampling rate ({fs:.0f} Hz) < 1000 Hz. "
-               "UHF-ECG analysis disabled. Only ND-ECG available.")
+# ── Kalite değerlendirmesi: lead konfigürasyonu ──
+lead_assess = assess_lead_configuration(leads_order)
+if lead_assess['level'] == 'error':
+    st.error(f"⚠️ {lead_assess['message']}")
+    st.stop()
+elif lead_assess['level'] == 'warning':
+    st.warning(f"⚠️ {lead_assess['message']}")
 
 # Preprocessing
 with st.spinner("Preprocessing signals..."):
@@ -229,9 +242,24 @@ for lead in leads_order:
         else:
             vd_nd[lead] = 0
 
+# ── Averaging güven değerlendirmesi ──
+avg_assess = assess_averaging_quality(avg_result['n_beats_used'],
+                                      avg_result['quality_score'])
+conf = overall_confidence(fs_assess, lead_assess, avg_assess)
+
 # ─── DISPLAY RESULTS ───
-st.success(f"✅ Analysis complete — {qrs_info['n_beats']} beats, "
-           f"{avg_result['n_beats_used']} used, quality {avg_result['quality_score']:.0%}")
+if avg_assess['level'] == 'warning':
+    st.warning(f"⚠️ {avg_assess['message']}")
+
+_conf_icon = {'Yüksek': '🟢', 'Orta': '🟡', 'Düşük': '🔴'}[conf['label']]
+st.success(f"✅ Analiz tamamlandı — {qrs_info['n_beats']} atım, "
+           f"{avg_result['n_beats_used']} kullanıldı, kalite "
+           f"{avg_result['quality_score']:.0%}  ·  {_conf_icon} Güven: {conf['label']}")
+
+if conf['confidence'] == 'low':
+    st.info("ℹ️ Düşük güven: Aşağıdaki dissenkroni metrikleri (e-DYS / nd-DYS) "
+            "sınırlı veri kalitesi nedeniyle güvenilir olmayabilir. Bunları kesin "
+            "değerler olarak değil, kaba tahminler olarak değerlendirin.")
 
 # Metrics row
 mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)

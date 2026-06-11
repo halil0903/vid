@@ -115,28 +115,90 @@ def get_lead_params(lead, pattern='normal'):
         
     return base
 
-def generate_ecg_signal(fs=2000, duration_s=10, pattern='normal', leads=None, noise_level=0.015):
+def _baseline_wander(t, fs):
+    """Gerçekçi taban çizgisi kayması: solunum (~0.25 Hz) + yavaş drift."""
+    resp = 0.05 * np.sin(2 * np.pi * 0.25 * t + np.random.uniform(0, 2 * np.pi))
+    drift = 0.03 * np.sin(2 * np.pi * 0.08 * t + np.random.uniform(0, 2 * np.pi))
+    return resp + drift
+
+
+def _emg_noise(t, fs, amp=0.02):
+    """Kas (EMG) gürültüsü: 20-150 Hz bandında bant-sınırlı gürültü.
+    Yüksek frekanslı olduğu için UHF analizini zorlar — gerçekçi test sağlar."""
+    from scipy.signal import butter, filtfilt
+    white = np.random.randn(len(t))
+    nyq = fs / 2.0
+    lo, hi = 20.0 / nyq, min(150.0 / nyq, 0.99)
+    if lo < hi:
+        b, a = butter(2, [lo, hi], btype='band')
+        emg = filtfilt(b, a, white)
+        return amp * emg / (np.std(emg) + 1e-9)
+    return amp * white
+
+
+def _motion_artifact(t, fs, n_events=2, amp=0.15):
+    """Ani hareket artefaktları: rastgele zamanlarda geçici büyük sapmalar."""
+    sig = np.zeros(len(t))
+    if len(t) < 10:
+        return sig
+    for _ in range(n_events):
+        center = np.random.uniform(t[0], t[-1])
+        width = np.random.uniform(0.05, 0.2)
+        sig += amp * np.random.choice([-1, 1]) * np.exp(-0.5 * ((t - center) / width) ** 2)
+    return sig
+
+
+def generate_ecg_signal(fs=2000, duration_s=10, pattern='normal', leads=None,
+                        noise_level=0.015, realism='basic', hr=70):
+    """Sentetik precordial ECG üret.
+
+    realism:
+      'clean'    - neredeyse gürültüsüz (algoritma doğrulaması için)
+      'basic'    - hafif beyaz gürültü + yavaş drift (eski varsayılan davranış)
+      'realistic'- baseline wander + EMG + ara sıra hareket artefaktı
+      'noisy'    - 'realistic' + güçlendirilmiş gürültü (dayanıklılık testi)
+    hr: kalp hızı (bpm)
+    """
     if leads is None:
         leads = ['V1', 'V2', 'V3', 'V4', 'V5', 'V6']
-    
+
     n_samples = int(duration_s * fs)
     t = np.arange(n_samples) / fs
-    
-    rr_interval = 0.857  # ~70 bpm
+
+    rr_interval = 60.0 / max(hr, 1)
     beat_times = np.arange(0.3, duration_s - 0.3, rr_interval)
-    beat_times += np.random.normal(0, 0.008, len(beat_times))
-    
+    # fizyolojik RR değişkenliği
+    beat_times = beat_times + np.random.normal(0, 0.008, len(beat_times))
+
+    # realism seviyesine göre gürültü ölçekleri
+    cfg = {
+        'clean':     dict(white=0.002, wander=0.0,  emg=0.0,   motion=0),
+        'basic':     dict(white=noise_level, wander=0.03, emg=0.0, motion=0),
+        'realistic': dict(white=0.01, wander=1.0,  emg=0.015, motion=2),
+        'noisy':     dict(white=0.02, wander=1.5,  emg=0.035, motion=4),
+    }.get(realism, dict(white=noise_level, wander=0.03, emg=0.0, motion=0))
+
     signals = {}
     for lead in leads:
         params = get_lead_params(lead, pattern)
         sig = np.zeros(n_samples)
         for bt in beat_times:
             sig += generate_single_beat(t, bt, params)
-        sig += np.random.normal(0, noise_level, n_samples)
-        sig += 0.03 * np.sin(2 * np.pi * 0.15 * t)
+        # beyaz gürültü
+        sig += np.random.normal(0, cfg['white'], n_samples)
+        # taban çizgisi
+        if cfg['wander'] > 0:
+            sig += cfg['wander'] * _baseline_wander(t, fs)
+        # EMG
+        if cfg['emg'] > 0:
+            sig += _emg_noise(t, fs, amp=cfg['emg'])
+        # hareket artefaktı
+        if cfg['motion'] > 0:
+            sig += _motion_artifact(t, fs, n_events=cfg['motion'])
         signals[lead] = sig
-    
-    return {'time_s': t, 'signals': signals, 'fs': fs, 'beat_times': beat_times}
+
+    return {'time_s': t, 'signals': signals, 'fs': fs,
+            'beat_times': beat_times, 'realism': realism}
 
 def save_ecg_csv(ecg_data, filepath):
     import pandas as pd

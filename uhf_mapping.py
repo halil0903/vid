@@ -74,7 +74,12 @@ def compute_uhfat(envelopes, time_axis_ms, threshold=0.5, qrs_onset_ms=0.0):
     """
     uhfat = {}
     for lead, data in envelopes.items():
-        env = data['envelope']
+        env = data['envelope'].copy()
+        # Gürültü zemini çıkarma: zarfın alt %20'sinin medyanı taban kabul edilir
+        # ve çıkarılır. Bu, beyaz/EMG gürültüsünün center-of-gravity'yi kaydırmasını
+        # azaltır (sağlamlık iyileştirmesi).
+        floor = np.median(np.sort(env)[:max(1, len(env) // 5)])
+        env = np.clip(env - floor, 0, None)
         mx = np.max(env)
         if mx <= 0:
             uhfat[lead] = 0.0
