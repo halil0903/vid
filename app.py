@@ -48,6 +48,7 @@ from report_generator import generate_pdf_report
 from sample_data_generator import generate_ecg_signal, save_ecg_csv
 from quality_checks import (assess_sampling_rate, assess_lead_configuration,
                             assess_averaging_quality, overall_confidence)
+from ecg_image_digitizer import load_image, detect_grid_spacing, digitize_ecg_image
 
 def get_leads_order(lead_names):
     order = ['V1','V2','V3','V4','V5','V6','V7','V8']
@@ -59,26 +60,47 @@ with st.sidebar:
     st.markdown("##### Ventricular Activation Analysis")
     st.markdown("---")
     
-    mode = st.radio("Analysis Mode", ["📊 Digital ECG Signal", "🖼️ ECG Image (Phase 2)"],
-                    index=0, help="Mode 2 will be available in a future update")
+    mode = st.radio("Analysis Mode", ["📊 Digital ECG Signal", "🖼️ ECG Image"],
+                    index=0, help="Görüntü modu: temiz dijital PDF/PNG ECG çıktıları için")
+
+    image_file = None
+    img_paper_speed = 25.0
+    img_gain = 10.0
+    img_n_leads = 6
+    img_layout = "Yatay şeritler (V1 üstte)"
     if "Image" in mode:
-        st.warning("⚠️ ECG Image mode is planned for Phase 2.")
-        st.stop()
+        st.info("🖼️ Görüntü modu: temiz dijital ECG (PDF/PNG) için. "
+                "UHF-ECG analizi görüntülerde fiziksel olarak mümkün değildir "
+                "(150–1050 Hz bileşenler kağıtta bulunmaz) — yalnızca ND-ECG ve "
+                "zamanlama analizi yapılır.")
+        image_file = st.file_uploader("ECG görüntüsü yükle", type=['png', 'jpg', 'jpeg', 'pdf'])
+        c1, c2 = st.columns(2)
+        with c1:
+            img_paper_speed = st.selectbox("Kağıt hızı (mm/s)", [25.0, 50.0], index=0)
+        with c2:
+            img_gain = st.selectbox("Kazanç (mm/mV)", [10.0, 20.0, 5.0], index=0)
+        img_n_leads = st.slider("Precordial lead sayısı (V1→Vn)", 2, 8, 6)
+        img_layout = st.selectbox("Düzen",
+                                  ["Yatay şeritler (V1 üstte)", "Yatay şeritler (V1 altta)"])
+        st.caption("Not: Görüntü eşit yatay bantlara bölünerek her lead çıkarılır. "
+                   "En iyi sonuç için tek sütunlu, üst üste dizilmiş lead şeritleri kullanın.")
     
-    st.markdown("### 📁 Data Input")
-    data_source = st.radio("Source", ["Upload CSV/TXT", "Sample Data"], horizontal=True)
-    
+    data_source = "Upload CSV/TXT"
     uploaded_file = None
     sample_pattern = None
-    
-    if data_source == "Upload CSV/TXT":
-        uploaded_file = st.file_uploader("Upload ECG file", type=['csv', 'txt'],
-                                          help="CSV with columns: time_s, V1, V2, ..., V6")
-    else:
-        sample_pattern = st.selectbox("Pattern", ["Normal Sinus", "LBBB", "RBBB"])
-        sample_realism = st.selectbox(
-            "Sinyal kalitesi", ["clean", "basic", "realistic", "noisy"], index=2,
-            help="clean: gürültüsüz · basic: hafif · realistic: baseline+EMG+hareket · noisy: ağır gürültü")
+
+    if "Image" not in mode:
+        st.markdown("### 📁 Data Input")
+        data_source = st.radio("Source", ["Upload CSV/TXT", "Sample Data"], horizontal=True)
+
+        if data_source == "Upload CSV/TXT":
+            uploaded_file = st.file_uploader("Upload ECG file", type=['csv', 'txt'],
+                                              help="CSV with columns: time_s, V1, V2, ..., V6")
+        else:
+            sample_pattern = st.selectbox("Pattern", ["Normal Sinus", "LBBB", "RBBB"])
+            sample_realism = st.selectbox(
+                "Sinyal kalitesi", ["clean", "basic", "realistic", "noisy"], index=2,
+                help="clean: gürültüsüz · basic: hafif · realistic: baseline+EMG+hareket · noisy: ağır gürültü")
     
     st.markdown("### ⚙️ Parameters")
     fs_input = st.number_input("Sampling Rate (Hz)", min_value=100, max_value=10000,
@@ -131,9 +153,31 @@ if not run_btn:
     st.stop()
 
 # ─── ANALYSIS PIPELINE ───
+img_digit_meta = None
 with st.spinner("Loading ECG data..."):
     try:
-        if data_source == "Upload CSV/TXT" and uploaded_file is not None:
+        if "Image" in mode:
+            if image_file is None:
+                st.error("Lütfen bir ECG görüntüsü yükleyin.")
+                st.stop()
+            gray = load_image(image_file.getvalue())
+            H, W = gray.shape
+            # Görüntüyü eşit yatay bantlara böl, her bant bir lead
+            n_leads = img_n_leads
+            lead_names = [f"V{i+1}" for i in range(n_leads)]
+            if "altta" in img_layout:
+                lead_names = lead_names[::-1]
+            margin = int(0.02 * H)
+            band_h = (H - 2 * margin) / n_leads
+            lead_bboxes = {}
+            for i, ln in enumerate(lead_names):
+                y0 = int(margin + i * band_h)
+                y1 = int(margin + (i + 1) * band_h)
+                lead_bboxes[ln] = (int(0.02 * W), y0, int(0.98 * W), y1)
+            ecg_data = digitize_ecg_image(
+                gray, lead_bboxes, paper_speed=img_paper_speed, gain=img_gain)
+            img_digit_meta = ecg_data.get('digitization')
+        elif data_source == "Upload CSV/TXT" and uploaded_file is not None:
             ecg_data = load_ecg_csv(uploaded_file, sampling_rate=fs_input)
         elif sample_pattern:
             pat_map = {"Normal Sinus": "normal", "LBBB": "lbbb", "RBBB": "rbbb"}
@@ -156,6 +200,24 @@ with st.spinner("Loading ECG data..."):
 fs = ecg_data['fs']
 leads_order = get_leads_order(ecg_data['lead_names'])
 
+# ── Görüntü dijitizasyonu: kullanıcıyı bilgilendir, UHF'i fiziksel olarak kapat ──
+force_uhf_off = False
+if img_digit_meta is not None:
+    gc = img_digit_meta.get('grid_confidence', 0)
+    st.info(f"🖼️ Görüntü dijitize edildi — efektif örnekleme ≈ "
+            f"{img_digit_meta['fs_effective']:.0f} Hz "
+            f"(grid: {img_digit_meta['px_per_mm_x']:.0f} px/mm, "
+            f"güven {gc:.0%}).")
+    st.warning("⚠️ **UHF-ECG analizi devre dışı (fiziksel sınır).** Görüntüden "
+               "dijitize edilen ECG, 150–1050 Hz UHF bileşenlerini içermez; bu "
+               "frekanslar yalnızca yüksek hızlı (≥1 kHz) ham kayıtlarda bulunur. "
+               "Yalnızca ND-ECG ve zamanlama analizi yapılır. Sonuçları kaba "
+               "tahmin olarak yorumlayın.")
+    if gc < 0.4:
+        st.warning("⚠️ Grid güveni düşük — kalibrasyon hatalı olabilir. Kağıt hızı "
+                   "ve kazanç değerlerini kontrol edin.")
+    force_uhf_off = True
+
 if not leads_order:
     st.error("No precordial leads (V1-V8) found in data.")
     st.stop()
@@ -167,7 +229,7 @@ if fs_assess['level'] == 'error':
     st.stop()
 elif fs_assess['level'] == 'warning':
     st.warning(f"⚠️ {fs_assess['message']}")
-uhf_possible = fs_assess['uhf_possible']
+uhf_possible = fs_assess['uhf_possible'] and not force_uhf_off
 
 # ── Kalite değerlendirmesi: lead konfigürasyonu ──
 lead_assess = assess_lead_configuration(leads_order)
