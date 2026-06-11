@@ -82,8 +82,9 @@ def get_lead_params(lead, pattern='normal'):
         base['s_amp'] = s_prog.get(lead_num, -0.1)
         base['r_width'] = 0.025
         base['s_width'] = 0.020
-        # LBBB: significant delay V1->V6 (~40-80ms spread)
-        at_shift = {1:-0.010, 2:-0.005, 3:0.005, 4:0.025, 5:0.040, 6:0.050, 7:0.045, 8:0.035}
+        # LBBB: V1->V6 belirgin gecikme. Literatüre kalibre edildi
+        # (Roubicek 2022, Curila 2024: LBBB e-DYS ~86±20 ms). Yayılım ~90 ms.
+        at_shift = {1:-0.020, 2:-0.012, 3:0.000, 4:0.030, 5:0.055, 6:0.070, 7:0.062, 8:0.050}
         shift = at_shift.get(lead_num, 0)
         base['r_offset'] += shift
         base['s_offset'] += shift
@@ -102,8 +103,9 @@ def get_lead_params(lead, pattern='normal'):
         base['s_amp'] = s_prog.get(lead_num, -0.1)
         base['r_width'] = 0.020
         base['s_width'] = 0.018
-        # RBBB: delayed V1-V2, early lateral
-        at_shift = {1:0.035, 2:0.030, 3:0.015, 4:0.0, 5:-0.005, 6:-0.005, 7:0.0, 8:0.005}
+        # RBBB: V1-V2 gecikmesi, erken lateral. Literatüre kalibre
+        # (Roubicek 2022: RBBB e-DYS ~-52±22 ms). Yayılım ~-55 ms.
+        at_shift = {1:0.050, 2:0.042, 3:0.022, 4:0.0, 5:-0.008, 6:-0.010, 7:0.0, 8:0.008}
         shift = at_shift.get(lead_num, 0)
         base['r_offset'] += shift
         base['s_offset'] += shift

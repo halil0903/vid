@@ -49,6 +49,7 @@ from sample_data_generator import generate_ecg_signal, save_ecg_csv
 from quality_checks import (assess_sampling_rate, assess_lead_configuration,
                             assess_averaging_quality, overall_confidence)
 from ecg_image_digitizer import load_image, detect_grid_spacing, digitize_ecg_image
+from reference_values import classify_edys, check_nd_edys_consistency
 
 def get_leads_order(lead_names):
     order = ['V1','V2','V3','V4','V5','V6','V7','V8']
@@ -337,6 +338,25 @@ with mc5:
     st.metric("Beats Used", f"{avg_result['n_beats_used']}")
 with mc6:
     st.metric("Quality", f"{avg_result['quality_score']:.0%}")
+
+# ── Literatür-tabanlı klinik yorum (yalnızca UHF mevcutsa anlamlı) ──
+if uhf_possible:
+    cls = classify_edys(edys_info['e_dys'])
+    nd_chk = check_nd_edys_consistency(edys_info['e_dys'], nd_dys_info['nd_dys'])
+    with st.expander("🔬 Literatür-tabanlı yorum (UHF-ECG referans değerleri)", expanded=True):
+        st.markdown(f"**Patern:** {cls['pattern']}")
+        st.markdown(cls['interpretation'])
+        if cls['matched_refs']:
+            st.markdown("**Literatür aralıklarıyla eşleşme:** " + "; ".join(cls['matched_refs']))
+        if cls['crt_note']:
+            st.info(cls['crt_note'])
+        if not nd_chk['consistent']:
+            st.warning(nd_chk['message'])
+        st.caption(
+            "Referanslar: Roubicek (Europace 2022), Curila (Heart Rhythm 2024; "
+            "Sci Rep 2024), Leinveber (Europace 2023). Bu değerler 14-lead UHF-ECG "
+            "(≥5 kHz) ile elde edilmiştir; bu araç araştırma/eğitim amaçlıdır, "
+            "tanısal kullanım için değildir.")
 
 # Tabs
 if uhf_possible and uhf_matrix is not None:
